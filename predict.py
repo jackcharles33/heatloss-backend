@@ -31,7 +31,7 @@ app.add_middleware(
 # --- Load The Model ---
 # Construct the full path to the model file
 # Vercel places API files in a specific directory, so we find it relative to this .py file
-model_path = os.path.join(os.path.dirname(__file__), 'finalmodel.joblib')
+model_path = os.path.join(os.path.dirname(__file__), '5000Model.joblib')
 
 model = None
 
