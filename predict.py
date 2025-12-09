@@ -5,11 +5,10 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Literal
-from tensorflow import keras
+# Import the custom class so joblib can unpickle it
+from production_model import HeatlossProductionModel
 
-# Define the expected input data structure using Pydantic
-# This still accepts the 7 features from your UI
+# Define Input Schema (Matches Frontend)
 class PredictionInput(BaseModel):
     size: float
     age: str
@@ -17,100 +16,83 @@ class PredictionInput(BaseModel):
     wallType: str
     floorType: str
     roofType: str
-    propertyType: str  # This will be the raw string, e.g., "Semi-Detached"
+    propertyType: str
 
-# Initialize the FastAPI app
+# Init App
 app = FastAPI()
 
-# Allow the Vercel frontend to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Consider restricting to your Vercel domain
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Load The Models (Preprocessor + NN Model) ---
+# Load Model
 base_path = os.path.dirname(__file__)
-PREPROCESSOR_FILE = 'preprocessor.joblib'
-MODEL_FILE = 'heatloss_nn_model.keras'
-
-preprocessor_path = os.path.join(base_path, PREPROCESSOR_FILE)
+MODEL_FILE = 'production_model.joblib'
 model_path = os.path.join(base_path, MODEL_FILE)
-
-preprocessor = None
 model = None
 
 try:
-    # Load the preprocessor (ColumnTransformer)
-    preprocessor = joblib.load(preprocessor_path)
-    print(f"Preprocessor loaded successfully from {PREPROCESSOR_FILE}")
-    
-    # Load the Keras model
-    model = keras.models.load_model(model_path)
-    print(f"Keras model loaded successfully from {MODEL_FILE}")
-    
-except FileNotFoundError as e:
-    print(f"Error: Model file not found. {e}")
+    if os.path.exists(model_path):
+        model = joblib.load(model_path)
+        print(f"Production model loaded successfully from {MODEL_FILE}")
+    else:
+        print(f"Error: {MODEL_FILE} not found in {base_path}")
 except Exception as e:
-    print(f"Error loading models: {e}")
+    print(f"Error loading model: {e}")
 
-# --- API Endpoint (WITH PROPERTYTYPE MAPPING) ---
 @app.post("/api/predict")
 async def predict_heatloss(input_data: PredictionInput):
-    # Check if *both* models are loaded
-    if preprocessor is None or model is None:
-        return {"success": False, "error": "Models could not be loaded. Check server logs."}
+    if model is None:
+        return {"success": False, "error": "Model not loaded on server."}
 
     try:
-# 1. Convert the single input item into a dictionary
         data = input_data.model_dump()
         
-        # --- 2. Manually Map propertyType ---
-        # Apply the same logic we used in the notebook
-        # If it's not 'Bungalow', treat it as 'Detached' for the model
-        if data['propertyType'].lower() != 'bungalow':
-            data['propertyType'] = 'Detached'
-        else:
-            data['propertyType'] = 'Bungalow'
-        # --- End of new logic ---
+        # Map Input -> DataFrame Columns expected by Production Model
+        # Note: We map frontend keys (camelCase) to backend training keys (snake_case)
+        input_df = pd.DataFrame([{
+            'ashp_survey_total_floor_area_sqm': data['size'],
+            'property_age': data['age'],
+            'walls_construction_type': data['wallType'],
+            'windows_glazing': data['windowType'],
+            'roof_type': data['roofType'],
+            'property_floor_type': data['floorType'],
+            # Optional features (missing in simple frontend form), handled by UValueMapper defaults
+            'final_walls_depth': None, 
+            'roof_insulation_thickness': None,
+            'final_floor_insulation_type': None,
+            'walls_insulation': None # For cavity check
+        }])
 
-        # 3. Convert the *mapped* dictionary into a 1-row DataFrame
-        input_df = pd.DataFrame([data])
+        # Predict
+        # Returns DataFrame with ['predicted_heatloss', 'safety_estimate', 'is_unserviceable_risk']
+        preds = model.predict(input_df) 
         
-        # 4. Preprocess the data
-        # The .transform() method runs scaling and one-hot encoding
-        processed_data = preprocessor.transform(input_df)
-        
-        # 5. Ensure data is dense (Keras needs a dense numpy array)
-        if hasattr(processed_data, "toarray"):
-            processed_data_dense = processed_data.toarray()
-        else:
-            processed_data_dense = processed_data
-        
-        # 6. Make the prediction with the Keras model
-        # Keras returns a 2D array, e.g., [[prediction]]
-        prediction_array = model.predict(processed_data_dense)
-        
-        # 7. Extract the single scalar value
-        predicted_heatloss = prediction_array[0][0]
+        # Extract Results
+        heatloss_w = float(preds['predicted_heatloss'].iloc[0])
+        risk_flag = bool(preds['is_unserviceable_risk'].iloc[0])
+        safety_est = float(preds['safety_estimate'].iloc[0])
 
-        # 8. Return the successful response
         return {
             "success": True,
-            "predicted_heatloss_w": round(float(predicted_heatloss), 2)
+            "predicted_heatloss_w": round(heatloss_w, 0), # Detailed Value
+            "is_unserviceable_risk": risk_flag,             # The "Booking Decision" Flag
+            "safety_estimate_w": round(safety_est, 0),      # The upper bound
+            "model_info": "Physics-Hybrid-V1"
         }
-        
+
     except Exception as e:
-        print(f"Error during prediction: {e}")
+        print(f"Prediction Error: {e}")
         return {"success": False, "error": str(e)}
 
-# A simple root endpoint to confirm the API is running
 @app.get("/api/predict")
 async def get_status():
     return {
-        "status": "API is running",
-        "preprocessor_loaded": preprocessor is not None,
-        "model_loaded": model is not None
+        "status": "API is running", 
+        "model_loaded": model is not None,
+        "type": "Physics-Hybrid"
     }

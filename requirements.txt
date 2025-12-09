@@ -4,5 +4,7 @@ pandas==2.3.3
 scikit-learn==1.6.1
 joblib==1.5.2
 pydantic==2.12.4
-tensorflow
-numpy
+numpy>=1.20
+xgboost>=2.0.0
+lightgbm>=4.0.0
+catboost>=1.2.0
