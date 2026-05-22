@@ -56,6 +56,26 @@ async def predict_heatloss(input_data: PredictionInput):
     try:
         data = input_data.model_dump()
 
+        # Extract depth hint from wallType string sent by the frontend.
+        # Frontend keys use patterns like:
+        #   "cavity-post60-290-310-filled"   → BETWEEN_290_310
+        #   "cavity-post60-under290-filled"  → LT_290
+        #   "cavity-post60-310"              → GT_290  (310mm = wider filled cavity)
+        # This was previously always None, stripping all depth signal from cavity
+        # walls and causing solid walls to fall into the wrong U-value bucket.
+        wall_raw = str(data.get('wallType', '')).lower()
+        if 'gt_290' in wall_raw or 'gt290' in wall_raw:
+            depth_hint = 'WALLS_DEPTH_GT_290'
+        elif 'post60-310' in wall_raw:
+            # "cavity-post60-310" key = 310mm wide cavity, wider than standard
+            depth_hint = 'WALLS_DEPTH_GT_290'
+        elif 'under290' in wall_raw or 'lt_290' in wall_raw or 'lt290' in wall_raw:
+            depth_hint = 'WALLS_DEPTH_LT_290'
+        elif '290_310' in wall_raw or '290-310' in wall_raw:
+            depth_hint = 'WALLS_DEPTH_BETWEEN_290_310'
+        else:
+            depth_hint = None  # model will use safe numeric default (228mm)
+
         input_df = pd.DataFrame([{
             'ashp_survey_total_floor_area_sqm': data['size'],
             'property_age': data['age'],
@@ -63,7 +83,7 @@ async def predict_heatloss(input_data: PredictionInput):
             'windows_glazing': data['windowType'],
             'roof_type': data['roofType'],
             'property_floor_type': data['floorType'],
-            'final_walls_depth': None,
+            'final_walls_depth': depth_hint,
             'roof_insulation_thickness': None,
             'final_floor_insulation_type': None,
             'walls_insulation': None
@@ -71,16 +91,18 @@ async def predict_heatloss(input_data: PredictionInput):
 
         preds = model.predict(input_df)
 
-        heatloss_w = float(preds['predicted_heatloss'].iloc[0])
-        risk_flag = bool(preds['is_unserviceable_risk'].iloc[0])
-        safety_est = float(preds['safety_estimate'].iloc[0])
+        heatloss_w   = float(preds['predicted_heatloss'].iloc[0])
+        risk_flag    = bool(preds['is_unserviceable_risk'].iloc[0])
+        borderline   = bool(preds['is_borderline'].iloc[0])
+        safety_est   = float(preds['safety_estimate'].iloc[0])
 
         return {
             "success": True,
-            "predicted_heatloss_w": round(heatloss_w, 0),
-            "is_unserviceable_risk": risk_flag,
-            "safety_estimate_w": round(safety_est, 0),
-            "model_info": "Physics-Hybrid-V2"
+            "predicted_heatloss_w":  round(heatloss_w, 0),
+            "safety_estimate_w":     round(safety_est, 0),
+            "is_unserviceable_risk": risk_flag,     # hard flag — >15kW, high confidence
+            "is_borderline":         borderline,    # softer flag — needs fuller survey
+            "model_info": "Physics-Hybrid-V3"
         }
 
     except Exception as e:

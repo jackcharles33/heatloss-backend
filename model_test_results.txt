@@ -1,0 +1,89 @@
+==============================================================
+HEAT LOSS MODEL — TEST RESULTS   (80/20 split, seed=42)
+Train: 27,032   Test: 6,759
+==============================================================
+  R²                 0.9054
+  MAE                740 W  (0.74 kW)
+  RMSE               1,103 W
+  MAPE               9.5%
+  Median APE         7.7%
+  Bias               +17 W  (+0.2%)
+  Within ±10%        61.8%
+  Within ±20%        90.6%
+--------------------------------------------------------------
+  >15 kW Recall      90.4%  (226/250 caught)  [main only: 68.4%]
+  >15 kW Precision   46.1%  [main only: 68.4%]
+  >15 kW F1          0.611
+  Safety CI covers   86.0% of actuals  (target ≈ 80%)
+==============================================================
+
+BY WALL TYPE
+                   n    MAE_W  MAPE_%  Bias_W
+wall_type                                    
+CAVITY        5552.0   634.49    9.10   10.56
+SOLID          796.0  1360.59   11.48   76.68
+TIMBER_FRAME   411.0   965.01   11.71   -9.50
+
+BY ERA
+                n    MAE_W  MAPE_%   Bias_W
+era_s                                      
+1960-2000  2707.0   669.20    8.96     9.94
+2000-08     531.0   606.98    9.20  -100.02
+Post-2008  1382.0   429.07    9.09   -52.32
+Pre-1960   2138.0  1063.09   10.64   101.44
+nan           1.0  2621.09   18.00 -2621.09
+
+BY HEAT LOSS BAND
+               n    MAE_W  MAPE_%   Bias_W
+hl_band                                   
+<4 kW      776.0   318.63    9.76   186.68
+4–7 kW    2747.0   493.70    8.99   102.45
+7–10 kW   1868.0   810.11    9.64    42.85
+10–15 kW  1118.0  1190.30   10.03   -63.22
+>15 kW     250.0  2219.36   11.93 -1279.66
+
+
+10 BEST PREDICTIONS (lowest % error)
+ Actual_W  Pred_W  AbsErr_W  PctErr%   Wall       Era  Area_m2
+     2520  2520.0       0.0      0.0 CAVITY 1960-2000     37.0
+     6558  6557.8       0.2      0.0 CAVITY 1960-2000    103.1
+     8882  8882.3       0.3      0.0 CAVITY  Pre-1960     97.4
+     4929  4929.4       0.4      0.0 CAVITY  Pre-1960     73.9
+     9866  9865.1       0.9      0.0  SOLID  Pre-1960     88.2
+     6939  6939.7       0.7      0.0 CAVITY  Pre-1960     96.3
+     3608  3607.5       0.5      0.0 CAVITY Post-2008    104.4
+     6846  6848.0       2.0      0.0 CAVITY 1960-2000    105.9
+    10722 10725.3       3.3      0.0 CAVITY 1960-2000    175.4
+     3586  3584.9       1.1      0.0 CAVITY Post-2008     94.6
+
+
+10 WORST PREDICTIONS (highest % error)
+ Actual_W  Pred_W  AbsErr_W  PctErr%         Wall       Era  Area_m2
+     2695  5601.1    2906.1    107.8       CAVITY 1960-2000     79.8
+     6866 12585.6    5719.6     83.3 TIMBER_FRAME  Pre-1960    129.3
+     4221  7635.1    3414.1     80.9       CAVITY 1960-2000    127.9
+     5170  8849.5    3679.5     71.2       CAVITY  Pre-1960    145.3
+     6465 10773.8    4308.8     66.6       CAVITY 1960-2000    175.3
+     8145 13372.4    5227.4     64.2        SOLID  Pre-1960    145.7
+     8282  3419.2    4862.8     58.7       CAVITY Post-2008     90.5
+     3834  6038.0    2204.0     57.5       CAVITY  Pre-1960     89.3
+     8565 13456.9    4891.9     57.1        SOLID  Pre-1960    129.7
+     3054  4749.8    1695.8     55.5       CAVITY Post-2008    120.7
+
+==============================================================
+LARGE PROPERTY CHECK  (>200 m²,  n=350)
+==============================================================
+  MAPE   11.4%   (overall: 9.5%)
+  MAE    1,596 W
+  Bias   +110 W  (overestimate)
+  R²     0.823
+
+  Worst 5 large-property predictions:
+ Actual_W  Pred_W  PctErr%         Wall       Era  Area_m2
+    18341 28184.0     54.0        SOLID  Pre-1960    252.0
+    29705 15872.0     47.0        SOLID  Pre-1960    215.0
+    12895 18400.0     43.0       CAVITY  Pre-1960    282.0
+    13046 18386.0     41.0        SOLID  Pre-1960    213.0
+     7576 10620.0     40.0 TIMBER_FRAME Post-2008    275.0
+
+  Verdict: PASS — element-area proxy appears effective for large properties
