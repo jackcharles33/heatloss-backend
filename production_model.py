@@ -125,7 +125,7 @@ class UValueMapper:
                 is_gt290 = (d >= 290)
                 is_lt290 = (d < 290)
             is_filled = (is_gt290 or
-                         'FILLED' in cons or
+                         ('FILLED' in cons and 'UNFILLED' not in cons) or
                          'INSULATED' in str(row.get('walls_insulation', '')).upper())
 
             if era == 'PRE_1960':
