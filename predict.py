@@ -92,11 +92,22 @@ async def predict_heatloss(input_data: PredictionInput):
         preds = model.predict(input_df)
 
         heatloss_w   = float(preds['predicted_heatloss'].iloc[0])
-        lower_bound  = float(preds['lower_bound'].iloc[0])
-        upper_bound  = float(preds['upper_bound'].iloc[0])
-        confidence   = int(preds['confidence_score'].iloc[0])
         risk_flag    = bool(preds['is_unserviceable_risk'].iloc[0])
         borderline   = bool(preds['is_borderline'].iloc[0])
+
+        # New model returns per-prediction quantile bounds and ensemble confidence.
+        # Old model (pre-retrain) only has safety_estimate — fall back gracefully.
+        if 'lower_bound' in preds.columns:
+            lower_bound = float(preds['lower_bound'].iloc[0])
+            upper_bound = float(preds['upper_bound'].iloc[0])
+            confidence  = int(preds['confidence_score'].iloc[0])
+        else:
+            # Backward compat: old model only has safety_estimate (85th pct upper)
+            upper_bound = float(preds['safety_estimate'].iloc[0])
+            # Estimate lower bound symmetrically around the prediction
+            upper_gap   = upper_bound - heatloss_w
+            lower_bound = heatloss_w - upper_gap
+            confidence  = 70  # honest placeholder until model is retrained
 
         # Sanity: ensure lower <= prediction <= upper
         lower_bound = min(lower_bound, heatloss_w)

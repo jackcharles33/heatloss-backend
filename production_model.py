@@ -520,43 +520,55 @@ class HeatlossProductionModel(BaseEstimator):
         return self
 
     def predict(self, X):
-        pred_log_main  = self.main_pipe.predict(X)
-        pred_log_upper = self.upper_pipe.predict(X)
-        pred_log_lower = self.lower_pipe.predict(X)
+        pred_log_main = self.main_pipe.predict(X)
+        pred_main = np.expm1(pred_log_main)
 
-        # Invert log transform — predictions are now back in watts
-        pred_main  = np.expm1(pred_log_main)
-        pred_upper = np.expm1(pred_log_upper)
-        pred_lower = np.expm1(pred_log_lower)
+        # Handle old pickled models that only have safety_pipe (no upper/lower)
+        has_quantile_pipes = (hasattr(self, 'upper_pipe') and self.upper_pipe is not None
+                             and hasattr(self, 'lower_pipe') and self.lower_pipe is not None)
+
+        if has_quantile_pipes:
+            pred_log_upper = self.upper_pipe.predict(X)
+            pred_log_lower = self.lower_pipe.predict(X)
+            pred_upper = np.expm1(pred_log_upper)
+            pred_lower = np.expm1(pred_log_lower)
+        elif hasattr(self, 'safety_pipe') and self.safety_pipe is not None:
+            # Old model — only has the 85th pct upper bound
+            pred_log_upper = self.safety_pipe.predict(X)
+            pred_upper = np.expm1(pred_log_upper)
+            # Mirror the upper gap to estimate a lower bound
+            pred_lower = pred_main - (pred_upper - pred_main)
+        else:
+            # No quantile info at all — use ±12% as a last resort
+            pred_upper = pred_main * 1.12
+            pred_lower = pred_main * 0.88
 
         # --- Per-prediction ensemble disagreement → confidence score ---
         # Access individual estimators from the VotingRegressor inside main_pipe.
         # The pipeline is: physics → prep → model (VotingRegressor)
         # We need to run physics+prep first, then predict from each sub-estimator.
         voting = self.main_pipe.named_steps['model']
-        # Transform X through the physics and prep stages
-        X_transformed = self.main_pipe[:-1].transform(X)
-        # Get individual predictions from each ensemble member
-        preds_individual = np.array([
-            est.predict(X_transformed) for est in voting.estimators_
-        ])  # shape: (3, n_samples) — in log space
-        # Convert to watts
-        preds_individual_watts = np.expm1(preds_individual)  # (3, n_samples)
-        # Ensemble standard deviation (in watts) — measures disagreement
-        ensemble_std = np.std(preds_individual_watts, axis=0)  # (n_samples,)
+        try:
+            X_transformed = self.main_pipe[:-1].transform(X)
+            preds_individual = np.array([
+                est.predict(X_transformed) for est in voting.estimators_
+            ])  # shape: (3, n_samples) — in log space
+            preds_individual_watts = np.expm1(preds_individual)  # (3, n_samples)
+            ensemble_std = np.std(preds_individual_watts, axis=0)  # (n_samples,)
 
-        # Confidence score: based on how tight the ensemble agreement is relative
-        # to the prediction magnitude. Lower CV = higher confidence.
-        # CV (coefficient of variation) = std / mean
-        ensemble_cv = ensemble_std / np.maximum(pred_main, 1.0)
-        # Map CV to a 0–100 confidence score:
-        #   CV=0.00 → 99%  (perfect agreement)
-        #   CV=0.05 → ~92% (very tight)
-        #   CV=0.10 → ~85% (good)
-        #   CV=0.15 → ~78% (moderate)
-        #   CV=0.25 → ~64% (poor)
-        # Formula: confidence = 99 - CV * 140, clamped to [50, 99]
-        confidence = np.clip(99 - ensemble_cv * 140, 50, 99).astype(int)
+            # CV (coefficient of variation) = std / mean
+            ensemble_cv = ensemble_std / np.maximum(pred_main, 1.0)
+            # Map CV to a 0–100 confidence score:
+            #   CV=0.00 → 99%  (perfect agreement)
+            #   CV=0.05 → ~92% (very tight)
+            #   CV=0.10 → ~85% (good)
+            #   CV=0.15 → ~78% (moderate)
+            #   CV=0.25 → ~64% (poor)
+            confidence = np.clip(99 - ensemble_cv * 140, 50, 99).astype(int)
+        except Exception:
+            # Old model or incompatible pipeline — can't compute ensemble disagreement
+            ensemble_std = np.zeros_like(pred_main)
+            confidence = np.full_like(pred_main, 70, dtype=int)
 
         return pd.DataFrame({
             'predicted_heatloss':    pred_main,
