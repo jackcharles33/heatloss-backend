@@ -76,6 +76,17 @@ async def predict_heatloss(input_data: PredictionInput):
         else:
             depth_hint = None  # model will use safe numeric default (228mm)
 
+        # Extract roof insulation thickness from roofType key (e.g. "pitched-200" → 200)
+        import re
+        roof_raw = str(data.get('roofType', ''))
+        roof_mm_match = re.search(r'(\d+)$', roof_raw)
+        roof_ins_mm = roof_mm_match.group(1) if roof_mm_match else None
+
+        # Extract floor insulation thickness from floorType key (e.g. "concrete-75" → 75)
+        floor_raw = str(data.get('floorType', ''))
+        floor_mm_match = re.search(r'(\d+)$', floor_raw)
+        floor_ins_mm = floor_mm_match.group(1) if floor_mm_match else None
+
         input_df = pd.DataFrame([{
             'ashp_survey_total_floor_area_sqm': data['size'],
             'property_age': data['age'],
@@ -84,8 +95,8 @@ async def predict_heatloss(input_data: PredictionInput):
             'roof_type': data['roofType'],
             'property_floor_type': data['floorType'],
             'final_walls_depth': depth_hint,
-            'roof_insulation_thickness': None,
-            'final_floor_insulation_type': None,
+            'roof_insulation_thickness': roof_ins_mm,
+            'final_floor_insulation_type': floor_ins_mm,
             'walls_insulation': None
         }])
 
