@@ -442,7 +442,8 @@ class HeatlossProductionModel(BaseEstimator):
     def __init__(self, random_state=42):
         self.random_state = random_state
         self.main_pipe    = None
-        self.safety_pipe  = None
+        self.upper_pipe   = None   # 85th percentile (upper bound)
+        self.lower_pipe   = None   # 15th percentile (lower bound)
 
     def _build_pipeline(self):
         xgb  = XGBRegressor(
@@ -463,8 +464,13 @@ class HeatlossProductionModel(BaseEstimator):
             ('xgb', xgb), ('cat', cat), ('lgbm', lgbm)
         ])
 
-        quantile = LGBMRegressor(
-            objective='quantile', alpha=0.85,   # raised from 0.80 → targets 85th pct
+        upper_quantile = LGBMRegressor(
+            objective='quantile', alpha=0.85,
+            n_estimators=600, learning_rate=0.04, max_depth=5,
+            random_state=self.random_state, verbose=-1)
+
+        lower_quantile = LGBMRegressor(
+            objective='quantile', alpha=0.15,
             n_estimators=600, learning_rate=0.04, max_depth=5,
             random_state=self.random_state, verbose=-1)
 
@@ -478,16 +484,22 @@ class HeatlossProductionModel(BaseEstimator):
             ('model',   ensemble),
         ])
 
-        safety_pipe = Pipeline([
+        upper_pipe = Pipeline([
             ('physics', physics_transformer),
             ('prep',    prep),
-            ('model',   quantile),
+            ('model',   upper_quantile),
         ])
 
-        return main_pipe, safety_pipe
+        lower_pipe = Pipeline([
+            ('physics', physics_transformer),
+            ('prep',    prep),
+            ('model',   lower_quantile),
+        ])
+
+        return main_pipe, upper_pipe, lower_pipe
 
     def fit(self, X, y):
-        self.main_pipe, self.safety_pipe = self._build_pipeline()
+        self.main_pipe, self.upper_pipe, self.lower_pipe = self._build_pipeline()
 
         y_arr = np.asarray(y)
 
@@ -503,34 +515,68 @@ class HeatlossProductionModel(BaseEstimator):
                         np.where(y_arr > 10000, 1.5, 1.0)))
 
         self.main_pipe.fit(X, y_log, model__sample_weight=sample_weight)
-        self.safety_pipe.fit(X, y_log, model__sample_weight=sample_weight)
+        self.upper_pipe.fit(X, y_log, model__sample_weight=sample_weight)
+        self.lower_pipe.fit(X, y_log, model__sample_weight=sample_weight)
         return self
 
     def predict(self, X):
-        pred_log_main   = self.main_pipe.predict(X)
-        pred_log_safety = self.safety_pipe.predict(X)
+        pred_log_main  = self.main_pipe.predict(X)
+        pred_log_upper = self.upper_pipe.predict(X)
+        pred_log_lower = self.lower_pipe.predict(X)
+
         # Invert log transform — predictions are now back in watts
-        pred_main   = np.expm1(pred_log_main)
-        pred_safety = np.expm1(pred_log_safety)
+        pred_main  = np.expm1(pred_log_main)
+        pred_upper = np.expm1(pred_log_upper)
+        pred_lower = np.expm1(pred_log_lower)
+
+        # --- Per-prediction ensemble disagreement → confidence score ---
+        # Access individual estimators from the VotingRegressor inside main_pipe.
+        # The pipeline is: physics → prep → model (VotingRegressor)
+        # We need to run physics+prep first, then predict from each sub-estimator.
+        voting = self.main_pipe.named_steps['model']
+        # Transform X through the physics and prep stages
+        X_transformed = self.main_pipe[:-1].transform(X)
+        # Get individual predictions from each ensemble member
+        preds_individual = np.array([
+            est.predict(X_transformed) for est in voting.estimators_
+        ])  # shape: (3, n_samples) — in log space
+        # Convert to watts
+        preds_individual_watts = np.expm1(preds_individual)  # (3, n_samples)
+        # Ensemble standard deviation (in watts) — measures disagreement
+        ensemble_std = np.std(preds_individual_watts, axis=0)  # (n_samples,)
+
+        # Confidence score: based on how tight the ensemble agreement is relative
+        # to the prediction magnitude. Lower CV = higher confidence.
+        # CV (coefficient of variation) = std / mean
+        ensemble_cv = ensemble_std / np.maximum(pred_main, 1.0)
+        # Map CV to a 0–100 confidence score:
+        #   CV=0.00 → 99%  (perfect agreement)
+        #   CV=0.05 → ~92% (very tight)
+        #   CV=0.10 → ~85% (good)
+        #   CV=0.15 → ~78% (moderate)
+        #   CV=0.25 → ~64% (poor)
+        # Formula: confidence = 99 - CV * 140, clamped to [50, 99]
+        confidence = np.clip(99 - ensemble_cv * 140, 50, 99).astype(int)
+
         return pd.DataFrame({
             'predicted_heatloss':    pred_main,
-            'safety_estimate':       pred_safety,
-            # Hard risk flag: main prediction clearly above threshold, or safety
-            # estimate (80th pct) above threshold. Keeps precision ~60% / recall ~82%.
-            # OR logic: flag if EITHER the main model OR the 85th-pct safety estimate
+            'lower_bound':           pred_lower,
+            'upper_bound':           pred_upper,
+            'safety_estimate':       pred_upper,   # backward compat alias
+            'confidence_score':      confidence,
+            'ensemble_std':          ensemble_std,
+            # Hard risk flag: main prediction clearly above threshold, or upper
+            # bound (85th pct) above threshold.
+            # OR logic: flag if EITHER the main model OR the 85th-pct upper bound
             # exceeds threshold. In production the prevalence of >15kW homes is ~30%
-            # (vs 5.4% in test data), so real-world precision is ~90% not 46% —
-            # the low test precision is a low-prevalence artefact. OR catches ~91%
-            # of unserviceable homes, reducing survey failure rate from 30% to ~5%.
-            # Safety threshold lowered 15000 → 14500 to catch near-miss FNs
-            # (CAVITY FILLED Unknown/Pre-1960 with safety estimates 14,500–14,983W).
-            'is_unserviceable_risk': (pred_main > 15000) | (pred_safety > 14500),
+            # (vs 5.4% in test data), so real-world precision is ~90% not 46%.
+            # Upper threshold lowered 15000 → 14500 to catch near-miss FNs.
+            'is_unserviceable_risk': (pred_main > 15000) | (pred_upper > 14500),
             # Borderline flag: model is uncertain — true heat loss may exceed 15kW.
-            # pred_main 10–15kW where safety estimate pushes toward 13kW+.
-            # Use this to prompt a fuller survey rather than a hard rejection.
+            # pred_main 10–15kW where upper bound pushes toward 13kW+.
             'is_borderline': (
-                ((pred_main >= 10000) & (pred_main <= 15000)) & (pred_safety > 13000)
-            ) | (pred_main > 15000) | (pred_safety > 15000),
+                ((pred_main >= 10000) & (pred_main <= 15000)) & (pred_upper > 13000)
+            ) | (pred_main > 15000) | (pred_upper > 15000),
         })
 
 

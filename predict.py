@@ -92,53 +92,25 @@ async def predict_heatloss(input_data: PredictionInput):
         preds = model.predict(input_df)
 
         heatloss_w   = float(preds['predicted_heatloss'].iloc[0])
+        lower_bound  = float(preds['lower_bound'].iloc[0])
+        upper_bound  = float(preds['upper_bound'].iloc[0])
+        confidence   = int(preds['confidence_score'].iloc[0])
         risk_flag    = bool(preds['is_unserviceable_risk'].iloc[0])
         borderline   = bool(preds['is_borderline'].iloc[0])
-        safety_est   = float(preds['safety_estimate'].iloc[0])
 
-        # ── Confidence score & interval ─────────────────────────────────────────
-        # Matches the scoring in server.py / api/predict.js.
-        # Base 72 %; era/size/wall bonuses; cap 88 %.
-        wall_type = data.get('wallType', '')
-        age       = data.get('age', '')
-        size      = data.get('size', 100)
-
-        confidence = 72
-
-        if   age == 'POST_2008':          confidence += 10
-        elif age == 'BETWEEN_2000_2008':  confidence += 7
-        elif age == 'BETWEEN_1960_2000':  confidence += 4
-        elif age == 'PRE_1960':           confidence += 2
-
-        if   60  <= size <= 150: confidence += 5
-        elif 150 <  size <= 220: confidence += 3
-        elif 220 <  size <= 300: confidence += 1
-
-        high_cavity = ('cavity-post60-310', 'cavity-post60-290-310-filled', 'cavity-post60-under290-filled')
-        mid_cavity  = ('timber-frame', 'cavity-post60-290-310-unfilled', 'cavity-post60-under290-unfilled')
-        pre60       = ('cavity-pre60-filled', 'cavity-pre60-unfilled')
-        solid       = ('solid-brick-102', 'solid-brick-228', 'solid-brick-343')
-
-        if   wall_type in high_cavity: confidence += 4
-        elif wall_type in mid_cavity:  confidence += 3
-        elif wall_type in pre60:       confidence += 2
-        elif wall_type in solid:       confidence += 1
-
-        confidence = min(88, confidence)
-
-        margin_frac = (100 - confidence) * 0.013
-        lower_bound = int(round(heatloss_w * (1 - margin_frac)))
-        upper_bound = int(round(heatloss_w * (1 + margin_frac * 1.1)))
+        # Sanity: ensure lower <= prediction <= upper
+        lower_bound = min(lower_bound, heatloss_w)
+        upper_bound = max(upper_bound, heatloss_w)
 
         return {
             "success": True,
             "predicted_heatloss_w":  round(heatloss_w, 0),
-            "safety_estimate_w":     round(safety_est, 0),
+            "safety_estimate_w":     round(upper_bound, 0),
             "is_unserviceable_risk": risk_flag,
             "is_borderline":         borderline,
             "confidence_score":      confidence,
-            "lower_bound_w":         lower_bound,
-            "upper_bound_w":         upper_bound,
+            "lower_bound_w":         int(round(lower_bound)),
+            "upper_bound_w":         int(round(upper_bound)),
             "model_info": "Physics-Hybrid-V3"
         }
 
